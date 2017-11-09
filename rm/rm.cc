@@ -108,6 +108,11 @@ int createColumnsAttribs(vector<Attribute>& clmAttrs)
     attr.length = 4;
     clmAttrs.push_back(attr);
 
+    attr.name = "column-exists";
+    attr.type = TypeInt;
+    attr.length = 4;
+    clmAttrs.push_back(attr);
+
     return 0;
 }
 
@@ -140,7 +145,10 @@ int createColumnsAttribData(const vector<Attribute>& clmAttrs, const Attribute& 
     offset += sizeof(int);
 
     memcpy((char*)data + offset, (char*)&position, sizeof(int));
+    offset += sizeof(int);
 
+    int exists = 0;
+    memcpy((char*)data + offset, (char*)&exists, sizeof(int));
     return 0;
 }
 
@@ -502,6 +510,7 @@ RC RelationManager::getAttributes(const string &tableName, vector<Attribute> &at
     matchattrbs.push_back(string("column-name"));
     matchattrbs.push_back(string("column-type"));
     matchattrbs.push_back(string("column-length"));
+    matchattrbs.push_back(string("column-exists"));
 
     stat = rbfm->scan(clmFHndl, clmAttrs, string("table-id"), EQ_OP, (void*)&tableid, matchattrbs, rbfmit);
     if (stat) return stat;
@@ -521,6 +530,11 @@ RC RelationManager::getAttributes(const string &tableName, vector<Attribute> &at
         memcpy((char*)&attrb.type, (char*)data + offset, sizeof(int));
         offset += sizeof(int);
         memcpy((char*)&attrb.length, (char*)data + offset, sizeof(int));
+        offset += sizeof(int);
+        int exists = 0;
+        memcpy((char*)&exists, (char*)data + offset, sizeof(int));
+        if (exists == 1)
+            continue;
         attrs.push_back(attrb);
     }
     free(data);
@@ -654,12 +668,25 @@ RC RelationManager::printTuple(const vector<Attribute> &attrs, const void *data)
     return 0;
 }
 
+bool isAttributeDropped(vector<Attribute>& attrs, const string& attributeName)
+{
+    int sz = attrs.size();
+    for (const Attribute& attrb : attrs)
+        if (attrb.name == attributeName)
+            return true;
+    return false;
+}
+
 RC RelationManager::readAttribute(const string &tableName, const RID &rid, const string &attributeName, void *data)
 {
     vector<Attribute> attrs;
     RC stat = 0;
     stat = getAttributes(tableName, attrs);
     if (stat) return stat;
+
+    if (isAttributeDropped(attrs, attributeName)) {
+        return -1;
+    }
 
     RecordBasedFileManager* rbfm = RecordBasedFileManager::instance();
 
@@ -763,11 +790,21 @@ RC RelationManager::dropAttribute(const string &tableName, const string &attribu
     if (stat) return stat;
 
     if (found) {
-        stat = rbfm->deleteRecord(clmFHndl, clmAttrs, rmRid);
+        void *data = malloc(200);
+        stat = rbfm->readRecord(clmFHndl, clmAttrs, rmRid, data);
         if (stat) {
             stat = rbfm->closeFile(clmFHndl);
             return stat;
         }
+        int datasz = rbfm->getDataSize(clmAttrs, data);
+        int exists = 1;
+        memcpy((char*)data+(datasz-sizeof(int)), (char*)&exists, sizeof(int));
+        stat = rbfm->updateRecord(clmFHndl, clmAttrs, data, rmRid);
+        if (stat) {
+            stat = rbfm->closeFile(clmFHndl);
+            return stat;
+        }
+        free(data);
     }
 
     stat = rbfm->closeFile(clmFHndl);
